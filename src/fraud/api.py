@@ -19,8 +19,10 @@ app = FastAPI(
 
 
 class Transaction(BaseModel):
-    """Only TransactionAmt is required. Any other IEEE-CIS column (card1, addr1, C1, D1, V12, id_31 ...)
-    may be added; missing ones are treated as unknown, exactly like in the training data."""
+    """Only TransactionAmt is required, but the model was trained on ~430 columns per transaction.
+    Send as many IEEE-CIS columns as you have (card1, addr1, C1, D1, V12, id_31 ...). Missing ones are
+    treated as unknown, but a request with very few fields looks nothing like real traffic (real rows
+    miss ~50% of columns), so the score is NOT reliable: see the `warning` field in the response."""
 
     model_config = ConfigDict(
         extra="allow",
@@ -44,6 +46,7 @@ class Score(BaseModel):
     decision: str
     threshold: float
     reasons: list[Reason]
+    warning: str | None = None
 
 
 class Batch(BaseModel):
@@ -77,13 +80,26 @@ def _reasons(bundle: dict, X: pd.DataFrame, top: int = 3) -> list[list[Reason]]:
     return out
 
 
+MAX_MISSING_SHARE = 0.85  # real rows miss at most ~80% of raw columns
+
+
+def _missing_share(bundle: dict, raw: pd.DataFrame) -> pd.Series:
+    cols = bundle["builder"].raw_columns_
+    present = raw.reindex(columns=cols)
+    return present.isna().mean(axis=1)
+
+
 def score_frame(bundle: dict, raw: pd.DataFrame) -> list[Score]:
+    missing = _missing_share(bundle, raw).to_numpy()
     X = bundle["builder"].transform(raw)
     p = bundle["model"].predict_proba(X)[:, 1]
     thr = float(bundle["threshold"])
     reasons = _reasons(bundle, X)
     return [Score(fraud_probability=round(float(pi), 6), decision="REVIEW" if pi >= thr else "APPROVE",
-                  threshold=thr, reasons=r) for pi, r in zip(p, reasons)]
+                  threshold=thr, reasons=r,
+                  warning=(f"{m:.0%} of the model's input fields were missing; this score is unreliable."
+                           if m > MAX_MISSING_SHARE else None))
+            for pi, r, m in zip(p, reasons, missing)]
 
 
 @app.get("/health")

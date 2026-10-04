@@ -44,3 +44,8 @@ def test_predict_batch(client):
 def test_bad_amount_is_rejected(client):
     assert client.post("/predict", json={"TransactionAmt": -5}).status_code == 422
     assert client.post("/predict", json={}).status_code == 422
+
+
+def test_sparse_request_gets_unreliable_score_warning(client):
+    r = client.post("/predict", json={"TransactionAmt": 50.0, "ProductCD": "W"})
+    assert r.status_code == 200 and r.json()["warning"]

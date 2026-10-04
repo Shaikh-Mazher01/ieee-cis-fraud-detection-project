@@ -17,11 +17,21 @@ def write_summary(cfg: dict) -> str:
     ab = sample_size(cfg)
     cap = m["capture"]
     weak = ", ".join(f"{w['group']}={w['value']} (recall {w['recall']:.0%})" for w in m["weakest_segments"])
+    sens = "\n".join(
+        f"| ${r['review_cost']:,.0f} | ${r['saving']:,.0f} | {r['flag_rate']:.1%} | {r['recall']:.0%} |"
+        for r in m.get("cost_sensitivity", []))
+    sens_block = ("\n**How much the saving depends on the review-cost assumption** (threshold re-chosen on "
+                  "validation each time, scored on the test period):\n\n"
+                  "| Cost per review | Saving | Flag rate | Recall |\n|---|---|---|---|\n" + sens + "\n") if sens else ""
+    th = m.get("model_training") or {}
+    health_note = (f"\n> **WARNING: this model stopped at its tree limit ({th.get('best_iteration')} of "
+                   f"{th.get('n_estimators')}) so it was still improving (probably a `--fast` run). "
+                   "Retrain without `--fast` for a converged model.**\n") if th.get("stopped_at_tree_limit") else ""
     synthetic_note = ("\n> **WARNING: these numbers come from SYNTHETIC data. They only prove the pipeline runs. "
                       "Do not present them as results.**\n") if cfg["profile"] == "synthetic" else ""
 
     text = f"""# Fraud detection: executive summary
-{synthetic_note}
+{synthetic_note}{health_note}
 **Problem.** About {m['test_fraud_rate']:.1%} of card transactions are fraud. Missed fraud is lost money and
 reviewing every transaction is impossible. We need to decide, in real time, which transactions a human should look at.
 
@@ -37,6 +47,10 @@ reviewing every transaction is impossible. We need to decide, in real time, whic
 
 **Impact.** Cost over the test period: no model {_usd(m['cost_approve_all'])} -> with model {_usd(m['cost_model'])},
 a saving of **{_usd(m['saving'])}** ({m['saving'] / max(m['cost_approve_all'], 1):.0%}). Reviewing everything would cost {_usd(m['cost_review_all'])}.
+
+{sens_block}
+**Assumptions.** Every flagged fraud is assumed to be stopped, and flagging a good customer is
+assumed to cost only the review (no lost sales or customer friction). Real costs are likely higher.
 
 **Risks.**
 - Fraudsters adapt; performance should be watched weekly (see `drift_train_vs_test.csv`).

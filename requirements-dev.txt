@@ -1,0 +1,3 @@
+# Full environment: training, evaluation, API, tests.   pip install -r requirements-dev.txt
+-r requirements.txt
+-e .[train,api,dev]

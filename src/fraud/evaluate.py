@@ -160,6 +160,30 @@ def performance_over_time(meta, p, day_col="day", bucket=14):
     return pd.DataFrame(rows)
 
 
+
+# --------------------------------------------------------------------------- assumption check
+def cost_sensitivity(va, te, model_col, loss_mult=1.0, review_costs=(1, 2, 5, 10, 20, 50)) -> pd.DataFrame:
+    """How much does the headline saving depend on the assumed cost of one manual review?
+    For each review cost the threshold is re-chosen on VALIDATION and scored once on TEST."""
+    rows = []
+    for rc in review_costs:
+        thr = best_threshold(cost_table(va.y, va[model_col], va.TransactionAmt, rc, loss_mult))
+        r = cost_table(te.y, te[model_col], te.TransactionAmt, rc, loss_mult, thresholds=[thr]).iloc[0]
+        base = baselines(te.y, te.TransactionAmt, rc, loss_mult)["approve_everything"]
+        rows.append({"review_cost": rc, "threshold": thr, "flag_rate": r.flagged / len(te),
+                     "recall": r.recall, "precision": r.precision, "cost": r.cost, "saving": base - r.cost})
+    return pd.DataFrame(rows)
+
+
+def training_health(model) -> dict:
+    """Detect a model that stopped because it hit the tree limit instead of converging (e.g. --fast)."""
+    params = model.get_params() if hasattr(model, "get_params") else {}
+    best, limit = getattr(model, "best_iteration", None), params.get("n_estimators")
+    hit_limit = bool(best is not None and limit and best >= 0.95 * limit)
+    return {"n_estimators": limit, "best_iteration": None if best is None else int(best),
+            "learning_rate": params.get("learning_rate"), "max_depth": params.get("max_depth"),
+            "stopped_at_tree_limit": hit_limit}
+
 # --------------------------------------------------------------------------- SHAP
 def shap_report(cfg, bundle, ids) -> pd.DataFrame | None:
     model = bundle["model"]
@@ -167,29 +191,22 @@ def shap_report(cfg, bundle, ids) -> pd.DataFrame | None:
         log.info("SHAP skipped: best model is not tree based")
         return None
     import shap
+    import xgboost as xgb
 
     n = min(cfg["shap"]["sample_size"], len(ids))
     pick = np.random.default_rng(cfg["seed"]).choice(ids, n, replace=False)
     sample = load_merged(cfg, filters=[(cfg["data"]["id_col"], "in", pick.tolist())])
     X = bundle["builder"].transform(sample)
-    
-    # Fix for XGBoost 2.x / SHAP base_score compatibility string formatting issue
-    if hasattr(model, "base_score") and not isinstance(model.base_score, (int, float)):
-        try:
-            val = model.base_score
-            if isinstance(val, (list, tuple, np.ndarray)):
-                val = val[0]
-            model.base_score = float(str(val).strip("[]"))
-        except Exception:
-            pass
 
-    explainer = shap.TreeExplainer(model)
-    sv = explainer.shap_values(X)
+    # SHAP values straight from XGBoost (pred_contribs). These ARE exact TreeSHAP values, and this
+    # avoids shap.TreeExplainer, which crashes on XGBoost >= 3 ("could not convert string to float:
+    # '[3.5E-2]'") because it cannot parse the bracketed base_score. No library patching needed.
+    sv = model.get_booster().predict(xgb.DMatrix(X), pred_contribs=True)[:, :-1]
     imp = pd.DataFrame({"feature": X.columns, "mean_abs_shap": np.abs(sv).mean(0)}) \
         .sort_values("mean_abs_shap", ascending=False)
     imp.to_csv(cfg["paths"]["tables_dir"] / "shap_importance.csv", index=False)
     plt.figure()
-    shap.summary_plot(sv, X, max_display=20, show=False)
+    shap.summary_plot(sv, X, max_display=20, show=False)  # plotting only; no explainer needed
     plt.title("What pushes a transaction toward 'fraud' (SHAP, test sample)")
     plt.tight_layout()
     plt.savefig(cfg["paths"]["figures_dir"] / "shap_beeswarm.png", dpi=140, bbox_inches="tight")
@@ -269,6 +286,13 @@ def evaluate(cfg: dict) -> dict:
         ax.grid(alpha=0.3)
         _save(fig, figs / "performance_over_time.png")
 
+    sens = cost_sensitivity(va, te, f"prob_{best}", lm)
+    sens.to_csv(tables / "cost_sensitivity.csv", index=False)
+    health = training_health(bundle["model"])
+    if health["stopped_at_tree_limit"]:
+        log.warning("model stopped at its tree limit (%s of %s): it was still improving. "
+                    "Retrain WITHOUT --fast for a converged model.", health["best_iteration"], health["n_estimators"])
+
     imp = shap_report(cfg, bundle, te[id_col].to_numpy())
 
     metrics = {
@@ -284,6 +308,8 @@ def evaluate(cfg: dict) -> dict:
         "saving": float(base["approve_everything"] - r.cost),
         "missed_loss": float(r.missed_loss), "review_spend": float(r.review_spend),
         "capture": cap,
+        "cost_sensitivity": sens.to_dict("records"),
+        "model_training": health,
         "top_features": imp.head(10).feature.tolist() if imp is not None else [],
         "weakest_segments": gm[gm.n >= 500].nsmallest(3, "recall")[["group", "value", "recall"]].to_dict("records"),
     }

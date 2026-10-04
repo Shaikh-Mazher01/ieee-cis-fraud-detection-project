@@ -50,7 +50,7 @@ def build_merged(cfg: dict, nrows: int | None = None) -> pd.DataFrame:
         if not f.exists():
             raise FileNotFoundError(
                 f"{f} not found.\n"
-                "Real data: run scripts/download_data.sh (see README, step 2).\n"
+                "Real data: run `bash scripts/download_data.sh` (needs a Kaggle account, see README).\n"
                 "No Kaggle account yet? Use fake data: python -m fraud synth --rows 100000, "
                 "then add --profile synthetic to every command."
             )
